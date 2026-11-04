@@ -11447,7 +11447,7 @@ function looseJSON(u8) {
   return JSON.parse(o.replace(/,(\s*[}\]])/g, '$1'));
 }
 // ---------- images ----------
-function decodeTGA(u8, raw) {
+function decodeTGA(u8) {
   const idl = u8[0], cmt = u8[1], type = u8[2], cml = u8[5] | u8[6] << 8, cmb = u8[7], w = u8[12] | u8[13] << 8, h = u8[14] | u8[15] << 8, bpp = u8[16], desc = u8[17];
   let p = 18 + idl + (cmt ? cml * Math.ceil(cmb / 8) : 0); const px = bpp >> 3, out = new Uint8ClampedArray(w * h * 4); let i = 0;
   const put = o => { if (px >= 3) { out[i] = u8[o + 2]; out[i + 1] = u8[o + 1]; out[i + 2] = u8[o]; out[i + 3] = px === 4 ? u8[o + 3] : 255; } else if (px === 2) { const v = u8[o] | u8[o + 1] << 8; out[i] = (v >> 10 & 31) * 8.2; out[i + 1] = (v >> 5 & 31) * 8.2; out[i + 2] = (v & 31) * 8.2; out[i + 3] = 255; } else { out[i] = out[i + 1] = out[i + 2] = u8[o]; out[i + 3] = 255; } i += 4; };
@@ -11455,35 +11455,8 @@ function decodeTGA(u8, raw) {
   if (type < 8) for (let k = 0; k < w * h; k++) { put(p); p += px; }
   else while (i < out.length && p < u8.length) { const c = u8[p++], n = (c & 127) + 1; if (c & 128) { for (let j = 0; j < n && i < out.length; j++) put(p); p += px; } else for (let j = 0; j < n && i < out.length; j++) { put(p); p += px; } }
   if (!(desc & 32)) { const row = w * 4, t = new Uint8ClampedArray(row); for (let y = 0; y < h >> 1; y++) { const a = y * row, b = (h - 1 - y) * row; t.set(out.subarray(a, a + row)); out.copyWithin(a, b, b + row); out.set(t, b); } }
-  if (raw) return { w, h, d: out };
   const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0); return c;
 }
-// PNG straight to RGBA bytes (a canvas would premultiply and lose the colour of nearly-transparent pixels)
-async function decodePNGRaw(u8) {
-  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength); let p = 8, w = 0, h = 0, depth = 8, ct = 6, inter = 0, pal = null, trns = null; const idat = [];
-  while (p + 8 <= u8.length) { const len = dv.getUint32(p), type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]), d = u8.subarray(p + 8, p + 8 + len);
-    if (type === 'IHDR') { w = dv.getUint32(p + 8); h = dv.getUint32(p + 12); depth = d[8]; ct = d[9]; inter = d[12]; } else if (type === 'PLTE') pal = d; else if (type === 'tRNS') trns = d; else if (type === 'IDAT') idat.push(d); else if (type === 'IEND') break; p += 12 + len; }
-  if (inter || !w || !h) return null;
-  const z = new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
-  const ch = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[ct], bpp = Math.max(1, ch * depth >> 3), stride = (w * ch * depth + 7) >> 3, out = new Uint8ClampedArray(w * h * 4);
-  let prev = new Uint8Array(stride), q = 0;
-  for (let y = 0; y < h; y++) {
-    const f = z[q++], line = z.slice(q, q + stride); q += stride;
-    for (let i = 0; i < stride; i++) { const a = i >= bpp ? line[i - bpp] : 0, b = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
-      line[i] = (line[i] + (f === 1 ? a : f === 2 ? b : f === 3 ? (a + b) >> 1 : f === 4 ? (() => { const pp = a + b - c, pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; })() : 0)) & 255; }
-    for (let x = 0; x < w; x++) {
-      const o = (y * w + x) * 4; let r, g, bl, al = 255;
-      const sample = k => { if (depth === 8) return line[x * ch + k]; if (depth === 16) return line[(x * ch + k) * 2]; const per = 8 / depth, by = line[(x / per) | 0], sh = (per - 1 - (x % per)) * depth; return (by >> sh) & ((1 << depth) - 1); };
-      if (ct === 3) { const i = sample(0); r = pal[i * 3]; g = pal[i * 3 + 1]; bl = pal[i * 3 + 2]; al = trns && i < trns.length ? trns[i] : 255; }
-      else if (ct === 0 || ct === 4) { let v = sample(0); if (depth < 8) v = v * 255 / ((1 << depth) - 1); r = g = bl = v; if (ct === 4) al = sample(1); }
-      else { r = sample(0); g = sample(1); bl = sample(2); if (ct === 6) al = sample(3); }
-      out[o] = r; out[o + 1] = g; out[o + 2] = bl; out[o + 3] = al;
-    }
-    prev = line;
-  }
-  return { w, h, d: out };
-}
-async function decodeEntityImage(u8, tga) { if (tga) return decodeTGA(u8, true); try { const r = await decodePNGRaw(u8); if (r) return r; } catch (e) { } return decodeImage(u8, false); }
 async function decodeImage(u8, tga) { if (tga) return decodeTGA(u8); return createImageBitmap(new Blob([u8], { type: 'image/png' })); }
 function canvasOf(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d', { willReadFrequently: true }); x.imageSmoothingEnabled = false; return [c, x]; }
 // ---------- the active pack ----------
@@ -11638,7 +11611,7 @@ async function packRestore() {
   try {
     const v = await packLoadStored(); if (!v || v.v !== 1) return;
     const bm = async b => { const im = await createImageBitmap(b); const [c, x] = canvasOf(im.width, im.height); x.drawImage(im, 0, 0); return c; };
-    let br = null; if (v.br) { const images = {}; await Promise.all(Object.entries(v.br.raw || {}).map(async ([k, r]) => { try { images[k] = await decodeEntityImage(new Uint8Array(await r.b.arrayBuffer()), r.tga); } catch (e) { } })); br = { data: JSON.parse(v.br.json), images }; }
+    let br = null; if (v.br) { const images = {}; await Promise.all(Object.entries(v.br.raw || {}).map(async ([k, r]) => { try { images[k] = await decodeImage(new Uint8Array(await r.b.arrayBuffer()), r.tga); } catch (e) { } })); br = { data: JSON.parse(v.br.json), images }; }
     const pk = { ...v, atlas: await bm(v.atlas), strip: await bm(v.strip), items: v.items ? await bm(v.items) : null, br };
     applyPack(pk); PACK.info = packInfo(v);
   } catch (e) { console.warn('could not restore resource pack', e); }
@@ -11702,7 +11675,7 @@ async function brCollect(zip, root, sub, find, progress) {
   const pick = (files, key, ref) => files.map(f => { const src = f && f[key]; if (!src) return null; const o = {}; for (const k in src) if (ref.has(k.toLowerCase())) o[k] = src[k]; return Object.keys(o).length ? { [key]: o } : null; }).filter(Boolean);
   const anim = pick(await listJSON('animations'), 'animations', aRef), ctrl = pick(await listJSON('animation_controllers'), 'animation_controllers', aRef), rc = pick(await listJSON('render_controllers'), 'render_controllers', rRef);
   progress('Mob textures'); const images = {}, raw = {}; let n = 0;
-  for (const p of tRef) { if (/entity\/(steve|alex)$/.test(p)) continue; const f = find(p); if (!f) continue; try { const u = await zip.read(f[0]); images[p] = await decodeEntityImage(u, f[1]); raw[p] = { b: new Blob([u]), tga: f[1] }; } catch (e) { } if (++n % 50 === 0) progress('Mob textures ' + n + '/' + tRef.size); }
+  for (const p of tRef) { if (/entity\/(steve|alex)$/.test(p)) continue; const f = find(p); if (!f) continue; try { const u = await zip.read(f[0]); images[p] = await decodeImage(u, f[1]); raw[p] = { b: new Blob([u]), tga: f[1] }; } catch (e) { } if (++n % 50 === 0) progress('Mob textures ' + n + '/' + tRef.size); }
   const settings = {};
   try { const m = looseJSON(await zip.read(root + 'manifest.json')); for (const s of m.settings || []) if (s.name) settings[s.name] = s.type === 'toggle' ? !!s.default : s.default; } catch (e) { }
   return { data: { ents: Object.values(ents), geo, anim, ctrl, rc, settings }, images, raw };
@@ -12119,22 +12092,13 @@ function brCompileGeo(id) {
 // ---------- textures (several layers are merged into one) ----------
 function brImg(path) { if (!path) return null; path = String(path).toLowerCase(); return BR.img[path] || BR.img[path.replace(/\.(png|tga)$/, '')] || null; }
 const isSkinPath = p => /entity\/(steve|alex)$/.test(p) || /entity\/player\//.test(p);
-// Bedrock entity textures can use the alpha channel as a colour mask (e.g. a sheep's face is stored nearly transparent):
-// nearly-transparent pixels are solid and keep their colour, solid ones take the tint (wool colour)
-function brMaskFix(img, tint) {
-  let w, h, a;
-  if (img.d) { w = img.w; h = img.h; a = new Uint8ClampedArray(img.d); }
-  else { const [c0, x0] = canvasOf(img.width, img.height); x0.drawImage(img, 0, 0); w = c0.width; h = c0.height; a = x0.getImageData(0, 0, w, h).data; }
-  for (let i = 0; i < a.length; i += 4) { const al = a[i + 3]; if (al > 0 && al <= 32) a[i + 3] = 255; else if (tint && al > 200) { a[i] *= tint[0]; a[i + 1] *= tint[1]; a[i + 2] *= tint[2]; } }
-  const [c, x] = canvasOf(w, h); x.putImageData(new ImageData(a, w, h), 0, 0); return c;
-}
-function brTexFor(paths, E, tint) {
+function brTexFor(paths, E) {
   if (E && E.player && paths.some(isSkinPath)) return entTex('skin:local');
-  const key = paths.join('|') + (tint ? '#' + tint.join() : ''); if (BR.tex[key] !== undefined) return BR.tex[key];
+  const key = paths.join('|'); if (BR.tex[key] !== undefined) return BR.tex[key];
   const imgs = paths.map(p => brImg(p) || javaEntImg(p)).filter(Boolean);
   if (!imgs.length) return BR.tex[key] = null;
-  const L = imgs.map(im => brMaskFix(im, tint)); if (L.length === 1) return BR.tex[key] = texFrom(L[0]);
-  const w = L[0].width, h = L[0].height, [c, x] = canvasOf(w, h); for (const im of L) x.drawImage(im, 0, 0, w, h); return BR.tex[key] = texFrom(c);
+  if (imgs.length === 1) return BR.tex[key] = texFrom(imgs[0]);
+  const w = imgs[0].width, h = imgs[0].height, [c, x] = canvasOf(w, h); for (const im of imgs) x.drawImage(im, 0, 0, w, h); return BR.tex[key] = texFrom(c);
 }
 function javaEntImg(p) { const m = /textures\/entity\/(.+)$/.exec(String(p)); if (!m) return null; return IMG['entity/' + m[1]] || null; }
 // ---------- per-entity state ----------
@@ -12216,7 +12180,7 @@ function brDraw(E, o, R) {
   let first = null; const all = [], out = [];
   for (let pi = 0; pi < passes.length; pi++) { const ps = passes[pi]; if (BR.onlyPass !== undefined && BR.onlyPass !== pi) continue;
     const G = brCompileGeo(ps.gid); if (!G) continue;
-    const tex = brTexFor(ps.tex, E, E.f.color); if (!tex) continue;
+    const tex = brTexFor(ps.tex, E); if (!tex) continue;
     const mats = ps.mats || (ps.mats = brMats(G, E)), vc = ps.vc || (ps.vc = {});
     if (!first) first = { G, mats, all }; all.push({ G, mats, vc, vis: ps.vis });
     const V = []; let nq = 0;
@@ -12254,7 +12218,6 @@ function brFactsMob(E, e) {
   f.main = e.held ? (typeof e.held === 'string' ? e.held : e.held.id) : (e.def.bow ? 'bow' : e.def.heldItem || ''); f.off = ''; f.armor = e.armor ? e.armor.map(a => a ? (a.id || a) : '') : [];
   f.name = e.customName || ''; f.biome = brBiome(e.x, e.z); f.climb = !!e.climbing; f.sleep = !!e.sleeping; f.casting = !!e.casting;
   f.props = { 'minecraft:climate_variant': e.climate || 'temperate' };
-  f.color = e.def.key === 'sheep' && e.color && e.color !== 'white' && typeof COLOR_HEX !== 'undefined' ? hexRGB(COLOR_HEX[e.color]) : null;
 }
 function brFactsPlayer(E) {
   const f = E.f, dt = Math.max(1e-3, E.dt || 0.016), px = f.x;
